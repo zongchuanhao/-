@@ -1,0 +1,97 @@
+from jqdata import finance
+def initialize(context):
+# 持有股票数10只
+    g.stocksnum = 10 
+# 轮动频率为10天
+    g.period = 10
+    run_daily(daily,time='every_bar')
+    g.days = 1 
+# 过滤掉order系列API产生的比error级别低的log
+    log.set_level('order', 'error')
+# 交易成本设定
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+    
+# 定义daily循环函数
+def daily(context):
+    # 止盈止损
+    stop(context)
+    # 判断策略进行天数是否能被轮动频率整除余1
+    if g.days % g.period == 1:
+        # 选出要交易的股票并交易
+        buylist=pick(context)
+        trade(context,buylist)
+    else:
+        pass
+        # 策略经过天数增加1
+    g.days = g.days + 1 
+    
+#定义止盈止损函数，设置止损线15%，止盈线30%
+def stop(context):
+    for stock in context.portfolio.positions:
+        if context.portfolio.positions[stock].price/context.portfolio.positions[stock].avg_cost < 0.85 or context.portfolio.positions[stock].price/context.portfolio.positions[stock].avg_cost > 1.3: 
+            order_target(stock, 0) 
+     
+# 选股
+def pick(context):
+    # 获取当前时间
+    date=context.current_dt.strftime("%Y-%m-%d")
+    # 获取上证指数和深证综指的成分股代码并连接，即为全A股市场所有股票
+    scu = get_index_stocks('000001.XSHG')+get_index_stocks('399106.XSHE')
+
+    # 选出在scu内的股票的股票代码，并选择基本面良好的股票（roe>0且pe<50,3<pb<5）
+    # 对跌幅靠前的股票（过滤掉跌停股）排序并按照市价买入
+    df = get_fundamentals(query(
+            valuation.code,
+            valuation.pb_ratio,
+            valuation.pe_ratio,
+            indicator.roe,
+            finance.STK_AH_PRICE_COMP.a_quote_change
+        ).filter(
+            valuation.code.in_(scu),
+            indicator.roe>0,
+            valuation.pe_ratio< 50,
+            valuation.pb_ratio.between(3,5)
+        ).order_by(
+            finance.STK_AH_PRICE_COMP.a_quote_change.asc()
+        ), date=date
+        )
+
+    # 取出前g.stocksnum名的股票代码，并转成list类型，buylist为选中的股票
+    buylist =list(df['code'][:g.stocksnum])
+    # 过滤停牌股票
+    buylist=paused_filter(buylist)
+    # 过滤跌停股票
+    buylist=high_limit_filter(context,buylist)
+    # 过滤st股票
+    buylist=st_filter(buylist)
+    return buylist
+
+# 交易
+def trade(context,buylist):
+    # 将总资产(现金+股票)除以持股数g.stocksnum
+    position_per_stk = context.portfolio.total_value/g.stocksnum
+    # 调整buylist中的每个股票持仓价值为position_per_stk
+    for stock in buylist:
+        order_target_value(stock, position_per_stk)
+
+# 过滤停牌股票
+def paused_filter(security_list):
+    current_data = get_current_data()
+    security_list = [stock for stock in security_list if not current_data[stock].paused]
+    # 返回结果
+    return security_list
+
+# 过滤跌停股票
+def high_limit_filter(context, security_list):
+    current_data = get_current_data()
+    security_list = [stock for stock in security_list if not (current_data[stock].day_open=current_data[stock].low_limit)]
+    # 返回结果
+    return security_list
+
+# 过滤ST股票
+
+def st_filter(security_list):
+    current_data = get_current_data()
+    security_list = [stock for stock in security_list if not current_data[stock].is_st]
+    # 返回结果
+    return security_list
